@@ -5,95 +5,89 @@ from PIL import Image, ImageDraw, ImageFont, ExifTags
 from datetime import datetime
 
 
-def get_exif_date(img: Image.Image, file_path: Path) -> str:
-    """
-    获取照片的拍摄日期（优先 EXIF），否则用文件修改时间。
-    返回 YYYY-MM-DD 格式字符串。
-    """
+def get_exif_date(image_path):
+    """获取 EXIF 中的拍摄日期（YYYY-MM-DD）。"""
     try:
-        exif = img._getexif()
-        if exif:
-            for tag, value in exif.items():
-                tag_name = ExifTags.TAGS.get(tag, tag)
-                if tag_name == "DateTimeOriginal":
-                    return value.split(" ")[0].replace(":", "-")
+        img = Image.open(image_path)
+        exif_data = img._getexif()
+        if not exif_data:
+            return None
+        for tag, value in exif_data.items():
+            tag_name = ExifTags.TAGS.get(tag, tag)
+            if tag_name == "DateTimeOriginal":
+                return datetime.strptime(value, "%Y:%m:%d %H:%M:%S").strftime("%Y-%m-%d")
     except Exception:
-        pass
-
-    # fallback: 文件修改时间
-    mtime = file_path.stat().st_mtime
-    return datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+        return None
+    return None
 
 
-def add_watermark(input_path: Path, font_size: int, color: str, position: str):
-    img = Image.open(input_path).convert("RGBA")
-    watermark_text = get_exif_date(img, input_path)
-
-    # 绘制层
+def add_watermark(image_path, text, font_size, color, position):
+    """给图片添加文字水印"""
+    img = Image.open(image_path).convert("RGBA")
     txt_layer = Image.new("RGBA", img.size, (255, 255, 255, 0))
-    draw = ImageDraw.Draw(txt_layer)
 
-    # 字体（跨平台可以用 DejaVuSans 或 Windows 自带 Arial）
+    # 字体
     try:
         font = ImageFont.truetype("arial.ttf", font_size)
-    except OSError:
+    except IOError:
         font = ImageFont.load_default()
 
-    # ✅ 兼容新旧 Pillow 版本
-    try:
-        bbox = draw.textbbox((0, 0), watermark_text, font=font)
-        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    except AttributeError:
-        # Pillow < 10
-        text_w, text_h = draw.textsize(watermark_text, font=font)
+    draw = ImageDraw.Draw(txt_layer)
+    text_size = draw.textbbox((0, 0), text, font=font)
+    text_width, text_height = text_size[2] - text_size[0], text_size[3] - text_size[1]
 
-    # 位置计算
-    if position == "left_top":
+    # 计算位置
+    if position == "center":
+        pos = ((img.width - text_width) // 2, (img.height - text_height) // 2)
+    elif position == "topleft":
         pos = (10, 10)
-    elif position == "center":
-        pos = ((img.width - text_w) // 2, (img.height - text_h) // 2)
-    elif position == "right_bottom":
-        pos = (img.width - text_w - 10, img.height - text_h - 10)
+    elif position == "bottomright":
+        pos = (img.width - text_width - 10, img.height - text_height - 10)
     else:
-        raise ValueError("位置参数错误: 仅支持 left_top, center, right_bottom")
+        pos = (10, img.height - text_height - 10)
 
-    # 绘制
-    draw.text(pos, watermark_text, font=font, fill=color)
+    draw.text(pos, text, fill=color, font=font)
 
-    # 合成并保存
-    output_img = Image.alpha_composite(img, txt_layer).convert("RGB")
-
-    # 保存到新目录
-    output_dir = input_path.parent / (input_path.parent.name + "_watermark")
-    output_dir.mkdir(exist_ok=True)
-    output_file = output_dir / input_path.name
-    output_img.save(output_file)
-    print(f"✅ 已保存: {output_file}")
+    watermarked = Image.alpha_composite(img, txt_layer)
+    return watermarked.convert("RGB")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="图片加拍摄日期水印工具")
-    parser.add_argument("path", help="图片文件路径")
-    parser.add_argument("--font_size", type=int, default=32, help="字体大小 (默认: 32)")
-    parser.add_argument("--color", type=str, default="red", help="字体颜色 (默认: red)")
+    parser = argparse.ArgumentParser(description="Add EXIF date watermark to photos")
+    parser.add_argument("input", help="Input image path or folder")
+    parser.add_argument("--font_size", type=int, default=32, help="Font size of watermark")
+    parser.add_argument("--color", type=str, default="white", help="Font color (e.g., red, blue, #RRGGBB)")
     parser.add_argument(
-        "--position", type=str, default="right_bottom",
-        choices=["left_top", "center", "right_bottom"],
-        help="水印位置 (默认: right_bottom)"
+        "--position", type=str, choices=["topleft", "center", "bottomright", "bottomleft"], default="bottomright"
     )
-
     args = parser.parse_args()
-    input_path = Path(args.path)
 
-    if not input_path.exists():
-        print("❌ 文件不存在:", input_path)
-        return
+    input_path = Path(args.input)
+    if input_path.is_file():
+        files = [input_path]
+        # 输出目录在 input 文件所在目录的同级
+        out_dir = input_path.parent.parent / f"{input_path.parent.name}_watermark"
+    else:
+        files = list(input_path.glob("*.*"))
+        # 输出目录在 images 同级
+        out_dir = input_path.parent / f"{input_path.name}_watermark"
 
-    add_watermark(input_path, args.font_size, args.color, args.position)
+    out_dir.mkdir(exist_ok=True)
+
+    for file in files:
+        if file.suffix.lower() not in [".jpg", ".jpeg", ".png"]:
+            continue
+        date = get_exif_date(file)
+        if not date:
+            # fallback: 用文件修改时间
+            mtime = datetime.fromtimestamp(file.stat().st_mtime)
+            date = mtime.strftime("%Y-%m-%d")
+            print(f"⚠ No EXIF date in {file}, using file mtime {date}")
+        watermarked = add_watermark(file, date, args.font_size, args.color, args.position)
+        save_path = out_dir / file.name
+        watermarked.save(save_path)
+        print(f"✅ Saved: {save_path}")
 
 
 if __name__ == "__main__":
     main()
-
-
-# python photo_watermark.py "./iamges/20250920_17371605.png" --font_size 40 --color blue --position center
